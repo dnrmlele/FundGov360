@@ -9,6 +9,14 @@ from datetime import datetime, timedelta
 import sys, os
 
 sys.path.insert(0, os.path.dirname(__file__))
+from utils.rule_engine import (
+    init_rules, get_next_rule_id, test_rule_against_data,
+    RULE_TYPES, DOMAINS, ENTITY_TYPES, SEVERITIES, ACTIONS
+)
+from utils.conflict_resolver import (
+    init_conflicts, RESOLUTION_STRATEGIES, TRUSTED_SOURCE_HIERARCHY,
+    SOURCES, ATTRIBUTE_CATALOGUE
+)
 from utils.data_generator import (
     FUNDS, gen_sub_funds, gen_share_classes, gen_nav_data,
     gen_portfolio, gen_transactions, gen_registration_matrix,
@@ -59,6 +67,9 @@ def load_all_data():
 
 funds_df, sub_funds_df, sc_df, nav_df, port_df, tx_df, reg_df, imp_df, dq_df = load_all_data()
 
+init_rules()
+init_conflicts(sc_df, sub_funds_df, reg_df)
+
 # ── Sidebar navigation ────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🏦 FundGov360")
@@ -74,7 +85,9 @@ with st.sidebar:
          "💸 Transactions",
          "🌍 Registration Matrix",
          "📈 Analytics & Trends",
-         "✅ Data Governance"],
+         "✅ Data Governance",
+         "🔧 DQ Rule Manager",
+         "⚔️ Conflict Resolver"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -804,3 +817,435 @@ elif page == "✅ Data Governance":
         st.info("**Data Governance Framework**: This platform follows the DAMA-DMBOK2 framework. "
                 "All data domains are assigned a Data Owner (executive accountability) and a Data Steward (operational responsibility). "
                 "DQ issues above threshold trigger automatic JIRA tickets routed to the responsible steward.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: DQ RULE MANAGER
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "🔧 DQ Rule Manager":
+    st.title("🔧 DQ Rule Manager")
+    st.caption("Create, manage and test data quality rules across all fund data domains")
+
+    rules_df = st.session_state["dq_rules"]
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Rule Catalogue", "➕ Add New Rule", "🧪 Test a Rule", "📊 Execution History"])
+
+    # ── TAB 1: RULE CATALOGUE ─────────────────────────────────────────────────
+    with tab1:
+        col1, col2, col3, col4 = st.columns(4)
+        total_rules = len(rules_df)
+        active_rules = len(rules_df[rules_df["active"] == True])
+        critical_rules = len(rules_df[rules_df["severity"] == "Critical"])
+        domains_covered = rules_df["domain"].nunique()
+        col1.metric("Total Rules", total_rules)
+        col2.metric("Active", active_rules)
+        col3.metric("Critical", critical_rules)
+        col4.metric("Domains Covered", domains_covered)
+
+        st.markdown("---")
+        # Filters
+        fc1, fc2, fc3 = st.columns(3)
+        flt_domain   = fc1.selectbox("Filter by Domain",   ["All"] + sorted(rules_df["domain"].unique().tolist()))
+        flt_severity = fc2.selectbox("Filter by Severity", ["All"] + SEVERITIES)
+        flt_active   = fc3.selectbox("Active only", ["All", "Active", "Inactive"])
+
+        disp = rules_df.copy()
+        if flt_domain   != "All": disp = disp[disp["domain"]   == flt_domain]
+        if flt_severity != "All": disp = disp[disp["severity"] == flt_severity]
+        if flt_active   == "Active":   disp = disp[disp["active"] == True]
+        if flt_active   == "Inactive": disp = disp[disp["active"] == False]
+
+        def sev_color(v):
+            return ("color:#FF4444" if v=="Critical" else
+                    "color:#FF8800" if v=="High" else
+                    "color:#FFD700" if v=="Medium" else "")
+
+        st.dataframe(
+            disp[["rule_id","rule_name","domain","entity_type","attribute","rule_type",
+                  "severity","action","active","created_by","created_at","tags"]]
+            .style.applymap(sev_color, subset=["severity"]),
+            use_container_width=True, height=480, hide_index=True
+        )
+
+        st.markdown("---")
+        st.subheader("🗑️ Toggle / Delete Rule")
+        col_a, col_b = st.columns(2)
+        sel_toggle = col_a.selectbox("Select Rule to Toggle Active/Inactive", rules_df["rule_id"].tolist())
+        if col_a.button("🔁 Toggle Status"):
+            idx = st.session_state["dq_rules"].index[st.session_state["dq_rules"]["rule_id"] == sel_toggle][0]
+            st.session_state["dq_rules"].at[idx, "active"] = not st.session_state["dq_rules"].at[idx, "active"]
+            new_status = "Active" if st.session_state["dq_rules"].at[idx, "active"] else "Inactive"
+            st.success(f"✅ Rule {sel_toggle} is now **{new_status}**")
+            st.rerun()
+
+        sel_delete = col_b.selectbox("Select Rule to Delete", rules_df["rule_id"].tolist(), key="del_rule")
+        if col_b.button("🗑️ Delete Rule", type="secondary"):
+            st.session_state["dq_rules"] = st.session_state["dq_rules"][
+                st.session_state["dq_rules"]["rule_id"] != sel_delete
+            ].reset_index(drop=True)
+            st.success(f"✅ Rule {sel_delete} deleted.")
+            st.rerun()
+
+    # ── TAB 2: ADD NEW RULE ───────────────────────────────────────────────────
+    with tab2:
+        st.subheader("➕ Create a New DQ Rule")
+        with st.form("new_rule_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            rule_name = c1.text_input("Rule Name *", placeholder="e.g. NAV must be positive")
+            domain    = c2.selectbox("Domain *", DOMAINS)
+
+            c3, c4 = st.columns(2)
+            entity_type = c3.selectbox("Entity Type *", ENTITY_TYPES)
+            attribute   = c4.text_input("Attribute *", placeholder="e.g. nav, isin, currency, status")
+
+            c5, c6 = st.columns(2)
+            rule_type   = c5.selectbox("Rule Type *", RULE_TYPES)
+            severity    = c6.selectbox("Severity *", SEVERITIES)
+
+            expression = st.text_area("Rule Expression *",
+                placeholder="e.g.  nav > 0  |  ^[A-Z]{2}[A-Z0-9]{10}$  |  abs(sum(weight_pct) - 100) <= 0.01",
+                height=80)
+
+            c7, c8, c9 = st.columns(3)
+            action     = c7.selectbox("Action on Failure", ACTIONS)
+            active_new = c8.checkbox("Active", value=True)
+            tags_new   = c9.text_input("Tags (comma-separated)", placeholder="nav,valuation")
+
+            description_new = st.text_area("Description / Business Justification",
+                placeholder="Explain why this rule exists and what it protects against", height=80)
+
+            c_user, _ = st.columns(2)
+            created_by_new = c_user.text_input("Created By", value="admin")
+
+            submitted = st.form_submit_button("💾 Save Rule", type="primary", use_container_width=True)
+
+        if submitted:
+            if not rule_name or not attribute or not expression:
+                st.error("❌ Please fill in Rule Name, Attribute, and Expression.")
+            else:
+                new_rule = {
+                    "rule_id":      get_next_rule_id(),
+                    "rule_name":    rule_name,
+                    "domain":       domain,
+                    "entity_type":  entity_type,
+                    "attribute":    attribute,
+                    "rule_type":    rule_type,
+                    "expression":   expression,
+                    "severity":     severity,
+                    "action":       action,
+                    "active":       active_new,
+                    "created_by":   created_by_new,
+                    "created_at":   datetime.now().strftime("%Y-%m-%d"),
+                    "tags":         tags_new,
+                }
+                new_row = pd.DataFrame([new_rule])
+                st.session_state["dq_rules"] = pd.concat(
+                    [st.session_state["dq_rules"], new_row], ignore_index=True
+                )
+                st.success(f"✅ Rule **{new_rule['rule_id']} — {rule_name}** created successfully!")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("**📖 Rule Type Reference**")
+        ref_data = {
+            "Rule Type": RULE_TYPES,
+            "Description": [
+                "Field must not be null/empty",
+                "Value must be within min/max bounds",
+                "Value must match regular expression pattern",
+                "Derived field must equal formula result",
+                "First date must be before second date",
+                "Date must be within allowed range",
+                "Sum/count across records must meet condition",
+                "Value must be unique within scope",
+                "Value must exist in reference list",
+                "Two values from different sources must match",
+                "Custom Python/SQL expression",
+            ]
+        }
+        st.dataframe(pd.DataFrame(ref_data), use_container_width=True, hide_index=True)
+
+    # ── TAB 3: TEST A RULE ────────────────────────────────────────────────────
+    with tab3:
+        st.subheader("🧪 Test Rule Against Live Data")
+        active_rules_list = rules_df[rules_df["active"] == True]
+        sel_rule_id = st.selectbox(
+            "Select Rule to Test",
+            active_rules_list["rule_id"].tolist(),
+            format_func=lambda rid: f"{rid} — {rules_df[rules_df['rule_id']==rid]['rule_name'].values[0]}"
+        )
+        sel_rule = rules_df[rules_df["rule_id"] == sel_rule_id].iloc[0].to_dict()
+
+        st.markdown(f"""
+        | Field | Value |
+        |---|---|
+        | **Domain** | {sel_rule['domain']} |
+        | **Entity Type** | {sel_rule['entity_type']} |
+        | **Attribute** | `{sel_rule['attribute']}` |
+        | **Expression** | `{sel_rule['expression']}` |
+        | **Severity** | {sel_rule['severity']} |
+        | **Action on Failure** | {sel_rule['action']} |
+        """)
+
+        if st.button("▶️ Run Rule Test", type="primary"):
+            with st.spinner("Running rule against data…"):
+                fails_df, stats = test_rule_against_data(sel_rule, nav_df, sc_df, tx_df, port_df)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Records Tested", stats["total"])
+            c2.metric("Passed", stats["passed"])
+            c3.metric("Failed", stats["failed"])
+            c4.metric("Pass Rate", f"{stats['pass_rate']}%",
+                      delta=f"{stats['pass_rate']-99:.2f}% vs 99% target",
+                      delta_color="normal" if stats['pass_rate'] >= 99 else "inverse")
+
+            # Log execution
+            st.session_state["rule_exec_log"].append({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "rule_id": sel_rule_id,
+                "rule_name": sel_rule["rule_name"],
+                "records_tested": stats["total"],
+                "passed": stats["passed"],
+                "failed": stats["failed"],
+                "pass_rate": stats["pass_rate"],
+            })
+
+            if stats["failed"] > 0 and len(fails_df) > 0:
+                st.markdown(f"**⚠️ {stats['failed']} violations found:**")
+                st.dataframe(fails_df, use_container_width=True, height=350)
+            elif stats["failed"] == 0:
+                st.success("✅ All records passed this rule!")
+
+    # ── TAB 4: EXECUTION HISTORY ──────────────────────────────────────────────
+    with tab4:
+        st.subheader("📊 Rule Execution History")
+        if len(st.session_state["rule_exec_log"]) == 0:
+            st.info("No rule executions yet. Go to the **Test a Rule** tab to run your first test.")
+        else:
+            log_df = pd.DataFrame(st.session_state["rule_exec_log"])
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Tests Run", len(log_df))
+            c2.metric("Avg Pass Rate", f"{log_df['pass_rate'].mean():.2f}%")
+            c3.metric("Total Violations", log_df["failed"].sum())
+            st.dataframe(log_df.sort_values("timestamp", ascending=False),
+                         use_container_width=True, height=400, hide_index=True)
+            if st.button("🗑️ Clear History"):
+                st.session_state["rule_exec_log"] = []
+                st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: CONFLICT RESOLVER
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "⚔️ Conflict Resolver":
+    st.title("⚔️ Data Conflict Resolver")
+    st.caption("Detect, investigate and resolve attribute conflicts across multiple data sources — feeds the Golden Record")
+
+    conflicts = st.session_state["conflicts"]
+    open_conflicts = conflicts[conflicts["status"] == "Open"]
+    resolved = conflicts[conflicts["status"] == "Resolved"]
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Total Conflicts", len(conflicts))
+    col2.metric("Open", len(open_conflicts),
+                delta=f"{len(open_conflicts[open_conflicts['severity']=='Critical'])} Critical",
+                delta_color="inverse")
+    col3.metric("In Review", len(conflicts[conflicts["status"]=="In Review"]))
+    col4.metric("Resolved", len(resolved))
+    col5.metric("Resolution Rate", f"{len(resolved)/len(conflicts)*100:.0f}%")
+
+    st.markdown("---")
+    tab1, tab2, tab3, tab4 = st.tabs(["🚨 Open Conflicts", "🔍 Resolve a Conflict", "🏆 Golden Record View", "📜 Resolution Log"])
+
+    # ── TAB 1: OPEN CONFLICTS ─────────────────────────────────────────────────
+    with tab1:
+        fc1, fc2, fc3 = st.columns(3)
+        flt_sev  = fc1.selectbox("Severity",     ["All","Critical","High","Medium","Low"], key="cf_sev")
+        flt_type = fc2.selectbox("Entity Type",  ["All","ShareClass","SubFund","Registration","NAV","Transaction"], key="cf_type")
+        flt_ctype= fc3.selectbox("Conflict Type",["All"] + sorted(conflicts["conflict_type"].unique().tolist()), key="cf_ctype")
+
+        disp_cf = conflicts[conflicts["status"].isin(["Open","In Review"])].copy()
+        if flt_sev   != "All": disp_cf = disp_cf[disp_cf["severity"]      == flt_sev]
+        if flt_type  != "All": disp_cf = disp_cf[disp_cf["entity_type"]   == flt_type]
+        if flt_ctype != "All": disp_cf = disp_cf[disp_cf["conflict_type"] == flt_ctype]
+
+        def severity_badge(row):
+            sev_colors = {"Critical":"#FF4444","High":"#FF8800","Medium":"#FFD700","Low":"#00C851"}
+            c = sev_colors.get(row["severity"],"#9E9E9E")
+            return [f"color:{c}" if col == "severity" else "" for col in row.index]
+
+        st.dataframe(
+            disp_cf[["conflict_id","entity_type","entity_id","attribute","conflict_type",
+                      "source_a","value_a","source_b","value_b","severity","detected_at","status"]]
+            .style.apply(severity_badge, axis=1),
+            use_container_width=True, height=480, hide_index=True
+        )
+
+        # Visual: conflicts by type
+        st.markdown("---")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            by_severity = conflicts.groupby("severity").size().reset_index(name="count")
+            color_map_sev = {"Critical":"#FF4444","High":"#FF8800","Medium":"#FFD700","Low":"#00C851"}
+            fig = px.pie(by_severity, values="count", names="severity", hole=0.4,
+                         color="severity", color_discrete_map=color_map_sev,
+                         title="By Severity")
+            fig.update_layout(height=300, paper_bgcolor="rgba(0,0,0,0)", font_color="#FAFAFA",
+                               margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(fig, use_container_width=True)
+        with col_b:
+            by_entity = conflicts.groupby("entity_type").size().reset_index(name="count")
+            fig2 = px.bar(by_entity, x="entity_type", y="count", color="entity_type",
+                          title="By Entity Type")
+            fig2.update_layout(height=300, plot_bgcolor="rgba(0,0,0,0)",
+                                paper_bgcolor="rgba(0,0,0,0)", font_color="#FAFAFA",
+                                showlegend=False, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    # ── TAB 2: RESOLVE A CONFLICT ─────────────────────────────────────────────
+    with tab2:
+        st.subheader("🔍 Conflict Investigation & Resolution")
+        open_ids = conflicts[conflicts["status"].isin(["Open","In Review"])]["conflict_id"].tolist()
+        if len(open_ids) == 0:
+            st.success("🎉 All conflicts have been resolved!")
+        else:
+            sel_conf_id = st.selectbox(
+                "Select Conflict to Resolve",
+                open_ids,
+                format_func=lambda cid: f"{cid} — {conflicts[conflicts['conflict_id']==cid]['entity_type'].values[0]} · {conflicts[conflicts['conflict_id']==cid]['attribute'].values[0]} · {conflicts[conflicts['conflict_id']==cid]['severity'].values[0]}"
+            )
+            conf = conflicts[conflicts["conflict_id"] == sel_conf_id].iloc[0]
+
+            # Conflict card
+            sev_color = {"Critical":"#FF4444","High":"#FF8800","Medium":"#FFD700","Low":"#00C851"}
+            sc_hex = sev_color.get(conf["severity"], "#9E9E9E")
+            st.markdown(f"""
+            <div style="background:#1E2329;border-radius:10px;padding:20px;border-left:5px solid {sc_hex};margin-bottom:16px">
+            <h4>⚔️ {conf['conflict_id']} — <span style="color:{sc_hex}">{conf['severity']}</span> | {conf['conflict_type']}</h4>
+            <p style="color:#aaa">{conf['description']}</p>
+            <b>Entity:</b> {conf['entity_type']} &nbsp;|&nbsp; <b>ID:</b> <code>{conf['entity_id']}</code> &nbsp;|&nbsp;
+            <b>Attribute:</b> <code>{conf['attribute']}</code> &nbsp;|&nbsp; <b>Detected:</b> {conf['detected_at']}
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"""
+                <div style="background:#1E2329;border-radius:8px;padding:14px;border:2px solid #0066CC">
+                <b>🅐 {conf['source_a']}</b><br>
+                <span style="font-size:24px;color:#0066CC"><b>{conf['value_a']}</b></span>
+                </div>""", unsafe_allow_html=True)
+            with col_b:
+                st.markdown(f"""
+                <div style="background:#1E2329;border-radius:8px;padding:14px;border:2px solid #FF8800">
+                <b>🅑 {conf['source_b']}</b><br>
+                <span style="font-size:24px;color:#FF8800"><b>{conf['value_b']}</b></span>
+                </div>""", unsafe_allow_html=True)
+
+            # Trusted source suggestion
+            domain_key = ("NAV" if conf["entity_type"]=="NAV" else
+                          "Registration" if conf["entity_type"]=="Registration" else
+                          "Static Data")
+            trusted_order = TRUSTED_SOURCE_HIERARCHY.get(domain_key, [])
+            if conf["source_a"] in trusted_order and conf["source_b"] in trusted_order:
+                a_rank = trusted_order.index(conf["source_a"])
+                b_rank = trusted_order.index(conf["source_b"])
+                suggestion = conf["source_a"] if a_rank < b_rank else conf["source_b"]
+                st.info(f"💡 **Suggested**: Accept **{suggestion}** — ranked #{min(a_rank,b_rank)+1} in trusted source hierarchy for {domain_key} data")
+            elif conf["source_a"] in trusted_order:
+                st.info(f"💡 **Suggested**: Accept **{conf['source_a']}** — ranked in trusted source hierarchy for {domain_key}")
+
+            st.markdown("---")
+            with st.form(f"resolve_form_{sel_conf_id}"):
+                c1, c2 = st.columns(2)
+                strategy = c1.selectbox("Resolution Strategy", RESOLUTION_STRATEGIES)
+                resolved_by = c2.text_input("Your Name / Initials", value="admin")
+                manual_value = st.text_input(
+                    "Override Value (only if 'Manual Override')",
+                    placeholder="Type the correct value to use as the Golden Record value"
+                )
+                comment = st.text_area("Comment / Justification", placeholder="Why did you choose this resolution?", height=80)
+                submit_res = st.form_submit_button("✅ Resolve Conflict", type="primary", use_container_width=True)
+
+            if submit_res:
+                if strategy == "Accept Source A":
+                    final_value = conf["value_a"]
+                elif strategy == "Accept Source B":
+                    final_value = conf["value_b"]
+                elif strategy == "Manual Override":
+                    final_value = manual_value if manual_value else conf["value_a"]
+                elif strategy == "Mark as Equivalent":
+                    final_value = conf["value_a"]
+                elif strategy == "Escalate to Data Owner":
+                    final_value = None
+                else:
+                    final_value = conf["value_a"]
+
+                idx = st.session_state["conflicts"].index[
+                    st.session_state["conflicts"]["conflict_id"] == sel_conf_id
+                ][0]
+                new_status = "Escalated" if strategy == "Escalate to Data Owner" else "Resolved"
+                st.session_state["conflicts"].at[idx, "status"]              = new_status
+                st.session_state["conflicts"].at[idx, "resolved_value"]      = final_value
+                st.session_state["conflicts"].at[idx, "resolution_strategy"] = strategy
+                st.session_state["conflicts"].at[idx, "resolved_by"]         = resolved_by
+                st.session_state["conflicts"].at[idx, "resolved_at"]         = datetime.now().strftime("%Y-%m-%d %H:%M")
+                st.session_state["conflicts"].at[idx, "comment"]             = comment
+
+                st.session_state["resolution_log"].append({
+                    "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "conflict_id": sel_conf_id,
+                    "entity_type": conf["entity_type"],
+                    "entity_id":   conf["entity_id"],
+                    "attribute":   conf["attribute"],
+                    "strategy":    strategy,
+                    "final_value": final_value,
+                    "resolved_by": resolved_by,
+                    "comment":     comment,
+                    "status":      new_status,
+                })
+
+                if new_status == "Resolved":
+                    st.success(f"✅ Conflict **{sel_conf_id}** resolved → Golden Record value: **{final_value}**")
+                else:
+                    st.warning(f"⚠️ Conflict **{sel_conf_id}** escalated to Data Owner.")
+                st.rerun()
+
+    # ── TAB 3: GOLDEN RECORD VIEW ─────────────────────────────────────────────
+    with tab3:
+        st.subheader("🏆 Golden Record — Resolved Attributes")
+        st.caption("Attributes whose conflicts have been resolved and are now canonical values in the Gold layer")
+
+        resolved_cf = conflicts[conflicts["status"] == "Resolved"].copy()
+        if len(resolved_cf) == 0:
+            st.info("No resolved conflicts yet. Resolve conflicts in the **Resolve a Conflict** tab.")
+        else:
+            gr_view = resolved_cf[["entity_type","entity_id","attribute","resolved_value",
+                                    "resolution_strategy","resolved_by","resolved_at","comment"]].copy()
+            gr_view.columns = ["Entity Type","Entity ID","Attribute","Golden Value",
+                                "Strategy","Resolved By","Resolved At","Comment"]
+            st.dataframe(gr_view, use_container_width=True, height=500, hide_index=True)
+
+            st.markdown("---")
+            # By entity type breakdown
+            entity_counts = resolved_cf.groupby("entity_type").size().reset_index(name="resolved")
+            st.subheader("Resolved Conflicts by Entity Type")
+            fig = px.bar(entity_counts, x="entity_type", y="resolved", color="entity_type",
+                         labels={"resolved":"Resolved Count","entity_type":"Entity Type"})
+            fig.update_layout(height=300, plot_bgcolor="rgba(0,0,0,0)",
+                               paper_bgcolor="rgba(0,0,0,0)", font_color="#FAFAFA",
+                               showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # ── TAB 4: RESOLUTION LOG ─────────────────────────────────────────────────
+    with tab4:
+        st.subheader("📜 Full Resolution Audit Log")
+        st.caption("Immutable audit trail of all conflict resolution decisions")
+        if len(st.session_state["resolution_log"]) == 0:
+            st.info("No resolutions recorded yet.")
+        else:
+            log_df = pd.DataFrame(st.session_state["resolution_log"])
+            st.dataframe(log_df.sort_values("timestamp", ascending=False),
+                         use_container_width=True, height=500, hide_index=True)
+            csv = log_df.to_csv(index=False)
+            st.download_button("📥 Export Audit Log (CSV)", data=csv,
+                               file_name=f"resolution_log_{datetime.now().strftime('%Y%m%d')}.csv",
+                               mime="text/csv")
