@@ -85,13 +85,18 @@ def load_data():
     from utils.data_generator import load_all_data
     gen = load_all_data(nav_days=365, n_transactions=500)
 
+    # Auto-create DB if it doesn't exist (Streamlit Cloud safe)
     if not os.path.exists(DB_PATH):
-        st.session_state["db_source"] = "⚠️ No DB found — using generated data. Run `python db_setup.py`."
-        return gen
+        try:
+            from db_setup import create_db
+            create_db()
+            st.session_state["db_source"] = "✅ DB auto-initialised on startup."
+        except Exception as e:
+            st.session_state["db_source"] = f"⚠️ Could not create DB ({e}) — using generated data."
+            return gen
 
     try:
         conn = sqlite3.connect(DB_PATH)
-
         funds_db = pd.read_sql_query("SELECT * FROM fund", conn)
         sf_db    = pd.read_sql_query("SELECT * FROM sub_fund", conn)
         sc_db    = pd.read_sql_query("SELECT * FROM share_class", conn)
@@ -102,19 +107,13 @@ def load_data():
         stew_db  = pd.read_sql_query("SELECT * FROM steward", conn)
         conn.close()
 
-        # Rename columns to match app expectations
-        nav_db  = nav_db.rename(columns={"nav_date": "date"})
-        tx_db   = tx_db.rename(columns={"error_flag": "error_flag"})  # already correct
-        stew_db = stew_db.rename(columns={"assigned_since": "assigned_since"})
-
-        # Ensure fund_id exists in nav (for AUM by Fund groupby)
+        nav_db = nav_db.rename(columns={"nav_date": "date"})
         if "fund_id" not in nav_db.columns and "sc_id" in nav_db.columns:
             nav_db = nav_db.merge(sc_db[["sc_id", "fund_id"]], on="sc_id", how="left")
 
         st.session_state["db_source"] = "✅ Live data — fundgov360.db"
 
         return {
-            # From SQLite
             "funds":         funds_db   if len(funds_db)  > 0 else gen["funds"],
             "sub_funds":     sf_db      if len(sf_db)     > 0 else gen["sub_funds"],
             "share_classes": sc_db      if len(sc_db)     > 0 else gen["share_classes"],
@@ -123,7 +122,6 @@ def load_data():
             "transactions":  tx_db      if len(tx_db)     > 0 else gen["transactions"],
             "registration":  reg_db     if len(reg_db)    > 0 else gen["registration"],
             "stewards":      stew_db    if len(stew_db)   > 0 else gen["stewards"],
-            # From generators (not yet in SQLite)
             "ytd":           gen["ytd"],
             "catalog":       gen["catalog"],
             "lineage":       gen["lineage"],
@@ -134,7 +132,6 @@ def load_data():
     except Exception as e:
         st.session_state["db_source"] = f"⚠️ DB error ({e}) — using generated data."
         return gen
-
 
 if "data" not in st.session_state:
     st.session_state["data"] = load_data()
