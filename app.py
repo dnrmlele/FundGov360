@@ -201,7 +201,7 @@ if page == "📊 Dashboard":
 
     with col_l:
         st.subheader("💼 AUM by Fund")
-        aum_fund = nav_df.merge(sc_df[["sc_id", "fund_id"]], on="sc_id").groupby("fund_id")["aum"].sum().reset_index()
+        aum_fund = nav_df.groupby("fund_id")["aum"].sum().reset_index()
         aum_fund = aum_fund.merge(funds_df[["fund_id", "fund_name"]], on="fund_id")
         fig_aum = px.pie(
             aum_fund, values="aum", names="fund_name",
