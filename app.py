@@ -270,20 +270,20 @@ elif page == "🔄 Data Layers":
     └──────────────────────────┬──────────────────────────────────────────────┘
                                │ Raw Files (CSV, XML, SWIFT MT950/536)
     ┌──────────────────────────▼──────────────────────────────────────────────┐
-    │                    🥉 BRONZE LAYER (Raw Ingest)                          │
-    │  nav_raw │ portfolio_raw │ transaction_raw │ static_raw │ reg_raw        │
+    │                    🥉 BRONZE LAYER (Raw Ingest)                         │
+    │  nav_raw │ portfolio_raw │ transaction_raw │ static_raw │ reg_raw       │
     │  • No transformation  • Timestamp + Source metadata  • Full audit trail │
     └──────────────────────────┬──────────────────────────────────────────────┘
                                │ Validation Engine (142 rules)
     ┌──────────────────────────▼──────────────────────────────────────────────┐
-    │                    🥈 SILVER LAYER (Curated)                             │
-    │  nav_clean │ portfolio_clean │ tx_enriched │ fund_master │ sc_master     │
+    │                    🥈 SILVER LAYER (Curated)                            │
+    │  nav_clean │ portfolio_clean │ tx_enriched │ fund_master │ sc_master    │
     │  • ISIN/LEI enrichment  • Dedup  • DQ scoring  • Cross-validation       │
     └──────────────────────────┬──────────────────────────────────────────────┘
                                │ Business Rules & Aggregation
     ┌──────────────────────────▼──────────────────────────────────────────────┐
-    │                    🥇 GOLD LAYER (Business-Ready)                        │
-    │  golden_nav │ golden_portfolio │ aum_timeseries │ reg_matrix_final       │
+    │                    🥇 GOLD LAYER (Business-Ready)                       │
+    │  golden_nav │ golden_portfolio │ aum_timeseries │ reg_matrix_final      │
     │  • Golden Record per Share Class  • T+2h SLA  • API / BI exposed        │
     └─────────────────────────────────────────────────────────────────────────┘
     ```
