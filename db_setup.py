@@ -10,7 +10,7 @@ from faker import Faker
 import os
 
 fake = Faker()
-fake.seed(42)
+Faker.seed(42)
 np.random.seed(42)
 
 DB_PATH = "fundgov360.db"
