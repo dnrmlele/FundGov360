@@ -1,7 +1,11 @@
 # app.py
 # FundGov360 v5 — Fund Data Governance Platform
 # Streamlit multi-page application | Bronze / Silver / Gold medallion architecture
+# Data: SQLite (operational) + generators (ytd, lineage, profiling fallback)
 
+import os
+import sqlite3
+import random
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,7 +13,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-from utils.data_generator import load_all_data
 from utils.rule_engine import (
     init_rule_engine_state, get_rules_df, run_all_rules,
     compute_dq_score, get_rules_summary_df, generate_alerts,
@@ -32,10 +35,10 @@ from utils.conflict_resolver import (
 # ─────────────────────────────────────────────
 
 st.set_page_config(
-    page_title    = "FundGov360",
-    page_icon     = "🏦",
-    layout        = "wide",
-    initial_sidebar_state = "expanded",
+    page_title="FundGov360",
+    page_icon="🏦",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 # ─────────────────────────────────────────────
@@ -70,30 +73,86 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# SESSION STATE — DATA BOOTSTRAP
+# DATA LOADING — SQLite + Generator Hybrid
+# SQLite: fund, sub_fund, share_class, nav, portfolio, transactions, registration, stewards
+# Generator fallback: ytd, catalog, lineage, profiling (not yet in DB)
 # ─────────────────────────────────────────────
 
-@st.cache_data(show_spinner="⏳ Generating synthetic fund data...")
-def load_data():
-    return load_all_data(nav_days=365, n_transactions=500)
+DB_PATH = "fundgov360.db"
 
-from db_setup import load_fundgov360_data
+@st.cache_data(ttl=300, show_spinner="⏳ Loading FundGov360 data...")
+def load_data():
+    from utils.data_generator import load_all_data
+    gen = load_all_data(nav_days=365, n_transactions=500)
+
+    if not os.path.exists(DB_PATH):
+        st.session_state["db_source"] = "⚠️ No DB found — using generated data. Run `python db_setup.py`."
+        return gen
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+
+        funds_db = pd.read_sql_query("SELECT * FROM fund", conn)
+        sf_db    = pd.read_sql_query("SELECT * FROM sub_fund", conn)
+        sc_db    = pd.read_sql_query("SELECT * FROM share_class", conn)
+        nav_db   = pd.read_sql_query("SELECT * FROM nav ORDER BY nav_date ASC", conn)
+        port_db  = pd.read_sql_query("SELECT * FROM portfolio_position ORDER BY market_value DESC", conn)
+        tx_db    = pd.read_sql_query("SELECT * FROM fund_transaction ORDER BY tx_date DESC", conn)
+        reg_db   = pd.read_sql_query("SELECT * FROM registration", conn)
+        stew_db  = pd.read_sql_query("SELECT * FROM steward", conn)
+        conn.close()
+
+        # Rename columns to match app expectations
+        nav_db  = nav_db.rename(columns={"nav_date": "date"})
+        tx_db   = tx_db.rename(columns={"error_flag": "error_flag"})  # already correct
+        stew_db = stew_db.rename(columns={"assigned_since": "assigned_since"})
+
+        # Ensure fund_id exists in nav (for AUM by Fund groupby)
+        if "fund_id" not in nav_db.columns and "sc_id" in nav_db.columns:
+            nav_db = nav_db.merge(sc_db[["sc_id", "fund_id"]], on="sc_id", how="left")
+
+        st.session_state["db_source"] = "✅ Live data — fundgov360.db"
+
+        return {
+            # From SQLite
+            "funds":         funds_db   if len(funds_db)  > 0 else gen["funds"],
+            "sub_funds":     sf_db      if len(sf_db)     > 0 else gen["sub_funds"],
+            "share_classes": sc_db      if len(sc_db)     > 0 else gen["share_classes"],
+            "nav":           nav_db     if len(nav_db)    > 0 else gen["nav"],
+            "portfolio":     port_db    if len(port_db)   > 0 else gen["portfolio"],
+            "transactions":  tx_db      if len(tx_db)     > 0 else gen["transactions"],
+            "registration":  reg_db     if len(reg_db)    > 0 else gen["registration"],
+            "stewards":      stew_db    if len(stew_db)   > 0 else gen["stewards"],
+            # From generators (not yet in SQLite)
+            "ytd":           gen["ytd"],
+            "catalog":       gen["catalog"],
+            "lineage":       gen["lineage"],
+            "lineage_nodes": gen["lineage_nodes"],
+            "profiling":     gen["profiling"],
+        }
+
+    except Exception as e:
+        st.session_state["db_source"] = f"⚠️ DB error ({e}) — using generated data."
+        return gen
+
 
 if "data" not in st.session_state:
-    st.session_state["data"] = load_fundgov360_data()
+    st.session_state["data"] = load_data()
 
-data            = st.session_state["data"]
-funds_df        = data["fund"]
-sf_df           = data["sub_funds"]
-sc_df           = data["share_classes"]
-nav_df          = data["nav"]
-port_df         = data["portfolio"]
-tx_df           = data["transactions"]
-reg_df          = data["registration"]
-stewards_df     = data["stewards"]
-teams_df        = data["teams"]
-data_elements   = data["data_elements"]
-taxonomy_domains = data["taxonomy_domains"]
+data         = st.session_state["data"]
+funds_df     = data["funds"]
+sf_df        = data["sub_funds"]
+sc_df        = data["share_classes"]
+nav_df       = data["nav"]
+ytd_df       = data["ytd"]
+port_df      = data["portfolio"]
+tx_df        = data["transactions"]
+reg_df       = data["registration"]
+stewards_df  = data["stewards"]
+catalog_df   = data["catalog"]
+lineage_df   = data["lineage"]
+nodes_df     = data["lineage_nodes"]
+profiling_df = data["profiling"]
 
 # Initialise engines
 init_rule_engine_state()
@@ -136,6 +195,19 @@ with st.sidebar:
     st.caption(f"Transactions: **{len(tx_df):,}**")
 
     st.markdown("---")
+    # DB status indicator
+    db_status = st.session_state.get("db_source", "")
+    if db_status.startswith("✅"):
+        st.success(db_status)
+    elif db_status:
+        st.warning(db_status)
+
+    if st.button("🔄 Refresh Data", use_container_width=True):
+        st.cache_data.clear()
+        st.session_state.pop("data", None)
+        st.rerun()
+
+    st.markdown("---")
     st.markdown('<span class="bronze-banner">🥉 Bronze</span> &nbsp; <span class="silver-banner">🥈 Silver</span> &nbsp; <span class="gold-banner">🥇 Gold</span>', unsafe_allow_html=True)
     st.caption("Medallion Architecture")
 
@@ -174,7 +246,6 @@ if page == "📊 Dashboard":
     st.title("📊 FundGov360 — Executive Dashboard")
     st.caption("Real-time fund data governance overview | Medallion architecture: Bronze → Silver → Gold")
 
-    # ── KPI Row 1
     total_aum = nav_df.groupby("sc_id")["aum"].last().sum()
     open_conflicts = len(get_open_conflicts_df())
     dq_results = run_all_rules(nav_df, sc_df, tx_df, port_df, reg_df)
@@ -196,7 +267,6 @@ if page == "📊 Dashboard":
 
     st.markdown("---")
 
-    # ── Row 2: AUM by Fund + DQ by Severity
     col_l, col_r = st.columns(2)
 
     with col_l:
@@ -232,7 +302,6 @@ if page == "📊 Dashboard":
             )
             st.plotly_chart(fig_dq, use_container_width=True)
 
-    # ── Row 3: NAV trend + Conflict breakdown
     col_a, col_b = st.columns(2)
 
     with col_a:
@@ -266,7 +335,6 @@ if page == "📊 Dashboard":
             )
             st.plotly_chart(fig_ct, use_container_width=True)
 
-    # ── Active Alerts
     st.subheader("🚨 Active DQ Alerts")
     alerts_df = generate_alerts(dq_results)
     if not alerts_df.empty:
@@ -282,7 +350,6 @@ elif page == "📈 NAV Monitor":
     st.title("📈 NAV Monitor")
     st.caption("Daily NAV per share class · Gold layer · Source: Fund Administrator / Bloomberg")
 
-    # Filters
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
         sel_fund = st.selectbox("Fund", ["All"] + funds_df["fund_name"].tolist())
@@ -295,7 +362,6 @@ elif page == "📈 NAV Monitor":
         sel_currency = st.multiselect("Currency", nav_df["currency"].unique().tolist(),
                                        default=nav_df["currency"].unique().tolist())
 
-    # Filter data
     nav_view = nav_df.copy()
     nav_view["date"] = pd.to_datetime(nav_view["date"])
     if sel_fund != "All":
@@ -307,7 +373,6 @@ elif page == "📈 NAV Monitor":
     if sel_currency:
         nav_view = nav_view[nav_view["currency"].isin(sel_currency)]
 
-    # KPIs
     k1, k2, k3, k4 = st.columns(4)
     latest_nav = nav_view.groupby("sc_id")["nav"].last()
     k1.metric("Share Classes", len(latest_nav))
@@ -317,7 +382,6 @@ elif page == "📈 NAV Monitor":
 
     st.markdown("---")
 
-    # NAV chart
     sc_options = nav_view["sc_id"].unique().tolist()
     sel_sc = st.multiselect("Select Share Classes to chart", sc_options, default=sc_options[:5])
     if sel_sc:
@@ -331,7 +395,6 @@ elif page == "📈 NAV Monitor":
                           font_color="white", height=400)
         st.plotly_chart(fig, use_container_width=True)
 
-    # YTD Performance
     st.subheader("📊 YTD Performance")
     ytd_merged = ytd_df.merge(sc_df[["sc_id", "sc_name", "currency"]], on="sc_id", how="left")
     ytd_merged["ytd_pct"] = ytd_merged["ytd_pct"].round(2)
@@ -345,7 +408,6 @@ elif page == "📈 NAV Monitor":
                           font_color="white", height=380, xaxis_tickangle=-45)
     st.plotly_chart(fig_ytd, use_container_width=True)
 
-    # Raw table
     with st.expander("🔍 Raw NAV Records"):
         st.dataframe(nav_view.sort_values("date", ascending=False).head(500),
                      use_container_width=True, hide_index=True)
@@ -358,7 +420,6 @@ elif page == "💰 AUM Tracker":
     st.title("💰 AUM Tracker")
     st.caption("Assets Under Management · Gold layer · Aggregated from NAV × shares outstanding")
 
-    # Latest AUM snapshot
     latest_nav_per_sc = nav_df.sort_values("date").groupby("sc_id").last().reset_index()
     aum_sc = latest_nav_per_sc[["sc_id", "fund_id", "aum", "currency"]].copy()
     aum_sc = aum_sc.merge(sc_df[["sc_id", "sc_name", "sub_fund_id"]], on="sc_id")
@@ -600,7 +661,6 @@ elif page == "🔧 DQ Rule Manager":
         "▶️ Run Rules", "📊 Results", "📈 Trends", "⚙️ Manage Rules", "📥 Import/Export"
     ])
 
-    # ── Tab: Run Rules
     with tab_run:
         st.subheader("▶️ Execute Rule Suite")
         col_r1, col_r2 = st.columns([3, 1])
@@ -619,66 +679,57 @@ elif page == "🔧 DQ Rule Manager":
         if results:
             score = compute_dq_score(results)
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Overall Score",    f"{score['overall_score']}%")
-            m2.metric("Weighted Score",   f"{score['weighted_score']}%")
-            m3.metric("Total Checked",    f"{score['total_checks']:,}")
-            m4.metric("Total Failed",     f"{score['total_failed']:,}")
-            m5.metric("SLA Breaches",     str(score['sla_breaches']))
+            m1.metric("Overall Score",  f"{score['overall_score']}%")
+            m2.metric("Weighted Score", f"{score['weighted_score']}%")
+            m3.metric("Total Checked",  f"{score['total_checks']:,}")
+            m4.metric("Total Failed",   f"{score['total_failed']:,}")
+            m5.metric("SLA Breaches",   str(score['sla_breaches']))
 
-            st.subheader("🚨 Active Alerts")
+            st.subheader("Active Alerts")
             alerts = generate_alerts(results)
             if not alerts.empty:
                 st.dataframe(alerts, use_container_width=True, hide_index=True)
             else:
-                st.success("✅ No alerts — all rules passing.")
+                st.success("No alerts — all rules passing.")
 
-    # ── Tab: Results
     with tab_results:
-        st.subheader("📊 Rule Results")
+        st.subheader("Rule Results")
         results = st.session_state.get("dq_results", {})
         if not results:
             st.info("Run rules first in the ▶️ Run Rules tab.")
         else:
             summary = get_rules_summary_df(results)
             st.dataframe(summary, use_container_width=True, hide_index=True)
-
-            st.subheader("❌ Failure Records")
+            st.subheader("Failure Records")
             failures = get_failures_summary(results)
             if not failures.empty:
                 st.dataframe(failures.head(200), use_container_width=True, hide_index=True)
             else:
-                st.success("✅ No failure records.")
+                st.success("No failure records.")
 
-    # ── Tab: Trends
     with tab_trends:
-        st.subheader("📈 DQ Pass-Rate Trends (30 days)")
-        trends_df = gen_rule_trends(days=30)
-        sel_rule = st.selectbox("Select Rule", trends_df["rule_id"].unique().tolist())
+        st.subheader("DQ Pass-Rate Trends — 30 days")
+        trends_df  = gen_rule_trends(days=30)
+        sel_rule   = st.selectbox("Select Rule", trends_df["rule_id"].unique().tolist())
         rule_trend = trends_df[trends_df["rule_id"] == sel_rule]
         sla_target = rule_trend["sla_target"].iloc[0]
-        fig_trend = go.Figure()
-        fig_trend.add_trace(go.Scatter(
-            x=rule_trend["date"], y=rule_trend["pass_rate"],
-            mode="lines+markers", name="Pass Rate", line=dict(color="#4fc3f7"),
-        ))
+        fig_trend  = go.Figure()
+        fig_trend.add_trace(go.Scatter(x=rule_trend["date"], y=rule_trend["pass_rate"],
+                                       mode="lines+markers", name="Pass Rate",
+                                       line=dict(color="#4fc3f7")))
         fig_trend.add_hline(y=sla_target, line_dash="dash", line_color="#ef5350",
                             annotation_text=f"SLA {sla_target}%")
-        fig_trend.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font_color="white", height=360, yaxis=dict(range=[70, 101]),
-        )
+        fig_trend.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                font_color="white", height=360, yaxis=dict(range=[70, 101]))
         st.plotly_chart(fig_trend, use_container_width=True)
 
-    # ── Tab: Manage Rules
     with tab_manage:
-        st.subheader("⚙️ Rule Library")
+        st.subheader("Rule Library")
         rules_df_display = get_rules_df()
-        st.dataframe(rules_df_display[[
-            "rule_id","rule_name","dataset","field","rule_type","severity","active","sla_pass_rate","owner"
-        ]], use_container_width=True, hide_index=True)
-
+        st.dataframe(rules_df_display[["rule_id","rule_name","dataset","field","rule_type","severity","active","sla_pass_rate","owner"]],
+                     use_container_width=True, hide_index=True)
         st.markdown("---")
-        st.subheader("➕ Add New Rule")
+        st.subheader("Add New Rule")
         with st.form("add_rule_form"):
             fc1, fc2 = st.columns(2)
             with fc1:
@@ -691,12 +742,11 @@ elif page == "🔧 DQ Rule Manager":
                 new_sev     = st.selectbox("Severity", SEVERITIES)
                 new_min     = st.number_input("Threshold Min", value=None, format="%.4f")
                 new_max     = st.number_input("Threshold Max", value=None, format="%.4f")
-                new_regex   = st.text_input("Regex Pattern", placeholder=r"^[A-Z]{2}...")
+                new_regex   = st.text_input("Regex Pattern", placeholder="r'^[A-Z]{2}...'")
                 new_formula = st.text_input("Formula Expression", placeholder="amount > 0")
                 new_sla     = st.number_input("SLA Pass Rate %", min_value=0.0, max_value=100.0, value=95.0)
                 new_owner   = st.text_input("Owner", value="Data Management")
-                new_desc    = st.text_area("Description")
-
+            new_desc = st.text_area("Description")
             submitted = st.form_submit_button("Add Rule", type="primary")
             if submitted:
                 new_rule = {
@@ -716,12 +766,12 @@ elif page == "🔧 DQ Rule Manager":
                 else:
                     try:
                         add_rule(new_rule)
-                        st.success(f"✅ Rule {new_id} added.")
+                        st.success(f"Rule {new_id} added.")
                     except ValueError as e:
                         st.error(str(e))
 
         st.markdown("---")
-        st.subheader("🔄 Toggle / Delete Rule")
+        st.subheader("Toggle / Delete Rule")
         col_t1, col_t2, col_t3 = st.columns(3)
         with col_t1:
             toggle_id = st.selectbox("Rule to Toggle", get_rules_df()["rule_id"].tolist(), key="toggle_sel")
@@ -736,21 +786,18 @@ elif page == "🔧 DQ Rule Manager":
                 delete_rule(delete_id)
                 st.warning(f"Deleted {delete_id}")
 
-    # ── Tab: Import/Export
     with tab_import:
-        st.subheader("📤 Export Rules")
+        st.subheader("Export Rules")
         export_df = export_rules_to_df()
         csv = export_df.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Download Rules CSV", data=csv,
-                           file_name="fundgov360_rules.csv", mime="text/csv")
-
+        st.download_button("⬇️ Download Rules CSV", data=csv, file_name="fundgov360_rules.csv", mime="text/csv")
         st.markdown("---")
-        st.subheader("📥 Import Rules from CSV")
-        uploaded = st.file_uploader("Upload rules CSV", type=["csv"])
+        st.subheader("Import Rules from CSV")
+        uploaded = st.file_uploader("Upload rules CSV", type="csv")
         if uploaded:
             import_df = pd.read_csv(uploaded)
             imported, skipped, errors = import_rules_from_df(import_df)
-            st.success(f"✅ Imported: {imported} | Skipped: {skipped}")
+            st.success(f"Imported {imported} · Skipped {skipped}")
             for e in errors:
                 st.warning(e)
 
@@ -763,19 +810,18 @@ elif page == "⚔️ Conflict Resolver":
     st.caption("Detect, triage and resolve data conflicts · Inspired by Informatica MDM / Talend MDM")
 
     tab_overview, tab_queue, tab_resolve, tab_golden, tab_audit, tab_simulate = st.tabs([
-        "📊 Overview", "📋 Conflict Queue", "✅ Resolve", "🥇 Golden Records", "📜 Audit Trail", "🧪 Simulate"
+        "📊 Overview", "📋 Conflict Queue", "🔧 Resolve", "🥇 Golden Records", "📜 Audit Trail", "🎲 Simulate"
     ])
 
-    # ── Tab: Overview
     with tab_overview:
         stats = get_resolution_stats()
         m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("Total Conflicts",    stats.get("total", 0))
-        m2.metric("Open",               stats.get("open", 0))
-        m3.metric("Resolved",           stats.get("resolved", 0))
-        m4.metric("Escalated",          stats.get("escalated", 0))
-        m5.metric("SLA Breaches",       stats.get("sla_breaches", 0))
-        m6.metric("Auto-Resolved",      stats.get("auto_resolved", 0))
+        m1.metric("Total Conflicts", stats.get("total", 0))
+        m2.metric("Open",            stats.get("open", 0))
+        m3.metric("Resolved",        stats.get("resolved", 0))
+        m4.metric("Escalated",       stats.get("escalated", 0))
+        m5.metric("SLA Breaches",    stats.get("sla_breaches", 0))
+        m6.metric("Auto-Resolved",   stats.get("auto_resolved", 0))
 
         st.markdown("---")
         col1, col2 = st.columns(2)
@@ -785,9 +831,9 @@ elif page == "⚔️ Conflict Resolver":
             by_pri = stats.get("by_priority", {})
             if by_pri:
                 pri_df = pd.DataFrame(list(by_pri.items()), columns=["Priority", "Count"])
-                fig_p = px.bar(pri_df, x="Priority", y="Count", color="Priority",
-                               color_discrete_map={"P1 – Critical":"#ef5350","P2 – High":"#ff9800",
-                                                   "P3 – Medium":"#fdd835","P4 – Low":"#66bb6a"})
+                fig_p  = px.bar(pri_df, x="Priority", y="Count", color="Priority",
+                                color_discrete_map={"P1 - Critical":"#ef5350","P2 - High":"#ff9800",
+                                                    "P3 - Medium":"#fdd835","P4 - Low":"#66bb6a"})
                 fig_p.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                     font_color="white", height=300, showlegend=False)
                 st.plotly_chart(fig_p, use_container_width=True)
@@ -802,20 +848,18 @@ elif page == "⚔️ Conflict Resolver":
                 fig_d.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="white", height=300)
                 st.plotly_chart(fig_d, use_container_width=True)
 
-        # Live detection
         st.markdown("---")
-        st.subheader("🔍 Detect Live Conflicts from Data")
-        if st.button("🔎 Run Conflict Detection", type="primary"):
+        st.subheader("Detect Live Conflicts from Data")
+        if st.button("🔍 Run Conflict Detection", type="primary"):
             new_conflicts = detect_conflicts(nav_df, sc_df, tx_df, port_df, reg_df)
             if new_conflicts:
                 st.session_state["conflicts"].extend(new_conflicts)
-                st.success(f"✅ Detected and added {len(new_conflicts)} new conflicts.")
+                st.success(f"Detected and added {len(new_conflicts)} new conflicts.")
             else:
                 st.info("No new conflicts detected in current data snapshot.")
 
-    # ── Tab: Queue
     with tab_queue:
-        st.subheader("📋 Open Conflict Queue")
+        st.subheader("Open Conflict Queue")
         open_df = get_open_conflicts_df()
         if open_df.empty:
             st.success("✅ No open conflicts.")
@@ -825,38 +869,35 @@ elif page == "⚔️ Conflict Resolver":
             st.dataframe(open_df[display_cols], use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        st.subheader("⚡ Auto-Resolver")
+        st.subheader("Auto-Resolver")
         resolver_name = st.text_input("Resolver Name", value="FundGov360 Auto-Resolver")
-        if st.button("🤖 Auto-Resolve All Eligible", type="primary"):
+        if st.button("⚡ Auto-Resolve All Eligible", type="primary"):
             resolved, skipped = auto_resolve_conflicts(resolver_name=resolver_name)
-            st.success(f"✅ Auto-resolved: {resolved} | Skipped: {skipped}")
+            st.success(f"Auto-resolved {resolved} · Skipped {skipped}")
 
-    # ── Tab: Resolve
     with tab_resolve:
-        st.subheader("✅ Manual Resolution")
+        st.subheader("Manual Resolution")
         conflicts_df = get_conflicts_df()
         open_ids = conflicts_df[conflicts_df["status"].isin(["Open","Under Review","Escalated"])]["conflict_id"].tolist()
-
         if not open_ids:
             st.success("✅ No open conflicts to resolve.")
         else:
             sel_cid = st.selectbox("Select Conflict", open_ids)
             conflict_row = conflicts_df[conflicts_df["conflict_id"] == sel_cid].iloc[0]
-
             st.markdown(f"**{conflict_row['title']}**")
             st.caption(conflict_row["description"])
             col_d1, col_d2 = st.columns(2)
             with col_d1:
-                st.info(f"**Source A:** {conflict_row['source_a']} → `{conflict_row['value_a']}`")
+                st.info(f"**Source A** ({conflict_row['source_a']}): {conflict_row['value_a']}")
             with col_d2:
-                st.warning(f"**Source B:** {conflict_row['source_b']} → `{conflict_row['value_b']}`")
-            st.caption(f"💡 Recommended: `{conflict_row['recommended_value']}` — {conflict_row['resolution_note']}")
+                st.warning(f"**Source B** ({conflict_row['source_b']}): {conflict_row['value_b']}")
+            st.caption(f"💡 Recommended: {conflict_row.get('recommended_value','')} — {conflict_row.get('resolution_note','')}")
 
             with st.form("resolve_form"):
-                final_val   = st.text_input("Final Value", value=str(conflict_row.get("recommended_value") or ""))
-                method      = st.selectbox("Resolution Method", RESOLUTION_METHODS)
-                resolved_by = st.text_input("Resolved By", value="Clément Denorme")
-                comment     = st.text_area("Resolution Comment")
+                final_val    = st.text_input("Final Value", value=str(conflict_row.get("recommended_value") or ""))
+                method       = st.selectbox("Resolution Method", RESOLUTION_METHODS)
+                resolved_by  = st.text_input("Resolved By", value="Clément Denorme")
+                comment      = st.text_area("Resolution Comment")
                 col_btn1, col_btn2, col_btn3 = st.columns(3)
                 with col_btn1:
                     submitted_res = st.form_submit_button("✅ Resolve", type="primary")
@@ -867,33 +908,29 @@ elif page == "⚔️ Conflict Resolver":
 
             if submitted_res:
                 resolve_conflict(sel_cid, final_val, method, resolved_by, comment)
-                st.success(f"✅ Conflict {sel_cid} resolved.")
+                st.success(f"Conflict {sel_cid} resolved.")
             if submitted_esc:
                 escalate_conflict(sel_cid, resolved_by, comment)
-                st.warning(f"⬆️ Conflict {sel_cid} escalated.")
+                st.warning(f"Conflict {sel_cid} escalated.")
             if submitted_rej:
                 reject_conflict(sel_cid, resolved_by, comment)
-                st.error(f"❌ Conflict {sel_cid} rejected.")
+                st.error(f"Conflict {sel_cid} rejected.")
 
-    # ── Tab: Golden Records
     with tab_golden:
-        st.subheader("🥇 Golden Record Status by Dataset")
+        st.subheader("Golden Record Status by Dataset")
         golden_df = build_golden_record_summary()
         st.dataframe(golden_df, use_container_width=True, hide_index=True)
-
         fig_gr = px.bar(
-            golden_df, x="Dataset", y="Golden Record %",
-            color="Golden Record %", color_continuous_scale="RdYlGn",
-            range_color=[60, 100], text="Golden Record %",
+            golden_df, x="Dataset", y="Golden Record %", color="Golden Record %",
+            color_continuous_scale="RdYlGn", range_color=[60, 100], text="Golden Record %",
         )
-        fig_gr.update_traces(texttemplate="%{text}%", textposition="outside")
+        fig_gr.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
         fig_gr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                              font_color="white", height=360, coloraxis_showscale=False)
         st.plotly_chart(fig_gr, use_container_width=True)
 
-    # ── Tab: Audit Trail
     with tab_audit:
-        st.subheader("📜 Audit Trail")
+        st.subheader("Audit Trail")
         filter_cid = st.text_input("Filter by Conflict ID (leave blank for all)", value="")
         audit_df   = get_audit_trail(conflict_id=filter_cid if filter_cid else None)
         if audit_df.empty:
@@ -901,14 +938,13 @@ elif page == "⚔️ Conflict Resolver":
         else:
             st.dataframe(audit_df, use_container_width=True, hide_index=True)
 
-    # ── Tab: Simulate
     with tab_simulate:
-        st.subheader("🧪 Conflict Simulator")
-        sim_type = st.selectbox("Conflict Type to Simulate", ["(random)"] + list(CONFLICT_TYPES))
+        st.subheader("Conflict Simulator")
+        sim_type = st.selectbox("Conflict Type to Simulate", ["random"] + list(CONFLICT_TYPES))
         if st.button("💉 Inject Simulated Conflict", type="primary"):
-            ct = None if sim_type == "(random)" else sim_type
+            ct = None if sim_type == "random" else sim_type
             new_c = simulate_new_conflict(conflict_type=ct)
-            st.success(f"✅ Injected: {new_c['conflict_id']} — {new_c['title']}")
+            st.success(f"Injected {new_c['conflict_id']} — {new_c['title']}")
 
 # ─────────────────────────────────────────────
 # PAGE: DATA CATALOG
@@ -940,27 +976,23 @@ elif page == "🔬 Data Profiling":
 
     with col1:
         st.subheader("Completeness by Field")
-        fig_comp = px.bar(
-            prof_view.sort_values("completeness_pct"), x="completeness_pct", y="field_name",
-            orientation="h", color="completeness_pct", color_continuous_scale="RdYlGn",
-            range_color=[70, 100],
-        )
+        fig_comp = px.bar(prof_view.sort_values("completeness_pct"),
+                          x="completeness_pct", y="field_name", orientation="h",
+                          color="completeness_pct", color_continuous_scale="RdYlGn", range_color=[70, 100])
         fig_comp.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                font_color="white", height=360, coloraxis_showscale=False)
         st.plotly_chart(fig_comp, use_container_width=True)
 
     with col2:
         st.subheader("Overall DQ Score by Field")
-        fig_dq = px.bar(
-            prof_view.sort_values("overall_dq_score"), x="overall_dq_score", y="field_name",
-            orientation="h", color="overall_dq_score", color_continuous_scale="Blues",
-            range_color=[70, 100],
-        )
+        fig_dq = px.bar(prof_view.sort_values("overall_dq_score"),
+                        x="overall_dq_score", y="field_name", orientation="h",
+                        color="overall_dq_score", color_continuous_scale="Blues", range_color=[70, 100])
         fig_dq.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                              font_color="white", height=360, coloraxis_showscale=False)
         st.plotly_chart(fig_dq, use_container_width=True)
 
-    st.subheader("📋 Profiling Statistics")
+    st.subheader("Profiling Statistics")
     st.dataframe(prof_view[[
         "field_name","data_type","nullable","row_count","null_count_pct","unique_count_pct",
         "completeness_pct","conformity_pct","validity_pct","overall_dq_score",
@@ -975,56 +1007,44 @@ elif page == "🔗 Data Lineage":
     st.title("🔗 Data Lineage")
     st.caption("Bronze → Silver → Gold pipeline · Inspired by Atlan Lineage / Apache Atlas")
 
-    tab_graph, tab_edges, tab_nodes = st.tabs(["🗺️ Lineage Graph", "🔗 Edge Table", "📋 Node Catalog"])
+    tab_graph, tab_edges, tab_nodes = st.tabs(["🔀 Lineage Graph", "📋 Edge Table", "🗂️ Node Catalog"])
 
     with tab_graph:
         st.subheader("Pipeline Lineage Graph")
-        # Build Sankey diagram
         node_list = nodes_df["node_id"].tolist()
-        labels    = [f"{r['dataset']} ({r['layer']})" for _, r in nodes_df.iterrows()]
+        labels    = [f"{r['dataset']}\n{r['layer']}" for _, r in nodes_df.iterrows()]
         node_idx  = {nid: i for i, nid in enumerate(node_list)}
         colors_by_layer = [layer_color(nodes_df.loc[nodes_df["node_id"] == nid, "layer"].values[0]) for nid in node_list]
-
         src_idx = [node_idx[r["source_node_id"]] for _, r in lineage_df.iterrows()]
         tgt_idx = [node_idx[r["target_node_id"]] for _, r in lineage_df.iterrows()]
 
         fig_sankey = go.Figure(go.Sankey(
             node=dict(label=labels, color=colors_by_layer, pad=20, thickness=20),
-            link=dict(source=src_idx, target=tgt_idx, value=[1]*len(src_idx),
-                      color="rgba(79,195,247,0.3)"),
+            link=dict(source=src_idx, target=tgt_idx, value=[1]*len(src_idx), color="rgba(79,195,247,0.3)"),
         ))
-        fig_sankey.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)", font_color="white", height=500,
-            title_text="FundGov360 — Data Lineage Sankey",
-        )
+        fig_sankey.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="white",
+                                 height=500, title_text="FundGov360 Data Lineage Sankey")
         st.plotly_chart(fig_sankey, use_container_width=True)
 
-        # Layer summary
-        st.subheader("📊 Layer Summary")
+        st.subheader("Layer Summary")
         layer_counts = nodes_df["layer"].value_counts().reset_index()
         layer_counts.columns = ["Layer", "Nodes"]
         for _, row in layer_counts.iterrows():
             color = layer_color(row["Layer"])
-            st.markdown(
-                f'<span style="color:{color};font-size:1.1rem;font-weight:700">'
-                f'🔹 {row["Layer"]}</span> — {row["Nodes"]} node(s)',
-                unsafe_allow_html=True
-            )
+            st.markdown(f'<span style="color:{color};font-size:1.1rem;font-weight:700">{row["Layer"]}</span> — {row["Nodes"]} nodes', unsafe_allow_html=True)
 
     with tab_edges:
-        st.subheader("🔗 Lineage Edges")
-        edge_display = lineage_df[[
-            "source_node_id","source_dataset","source_layer","source_system",
-            "target_node_id","target_dataset","target_layer","target_system",
-            "transformation","last_run","status"
-        ]].copy()
+        st.subheader("Lineage Edges")
+        edge_display = lineage_df[["source_node_id","source_dataset","source_layer","source_system",
+                                   "target_node_id","target_dataset","target_layer","target_system",
+                                   "transformation","last_run","status"]].copy()
         edge_display["status"] = edge_display["status"].apply(
-            lambda s: f"✅ {s}" if s == "Success" else (f"⚠️ {s}" if s == "Warning" else f"🔴 {s}")
+            lambda s: f"✅ {s}" if s == "Success" else f"⚠️ {s}" if s == "Warning" else f"❌ {s}"
         )
         st.dataframe(edge_display, use_container_width=True, hide_index=True)
 
     with tab_nodes:
-        st.subheader("📋 Node Catalog")
+        st.subheader("Node Catalog")
         st.dataframe(nodes_df, use_container_width=True, hide_index=True)
 
 # ─────────────────────────────────────────────
@@ -1076,14 +1096,14 @@ elif page == "👤 Stewardship":
         fig_d.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="white", height=300)
         st.plotly_chart(fig_d, use_container_width=True)
 
-    st.subheader("👥 Steward Directory")
+    st.subheader("Steward Directory")
     st.dataframe(
         stew_view[["steward_id","name","email","role","department","location","active","assigned_since"]],
         use_container_width=True, hide_index=True,
     )
 
     st.markdown("---")
-    st.subheader("📋 Asset Ownership Map")
+    st.subheader("Asset Ownership Map")
     ownership = catalog_df[["asset_name","asset_type","steward_name","steward_role","quality_score","certified"]].copy()
-    ownership["certified"] = ownership["certified"].apply(lambda x: "✅" if x else "—")
+    ownership["certified"] = ownership["certified"].apply(lambda x: "✅" if x else "")
     st.dataframe(ownership, use_container_width=True, hide_index=True)
