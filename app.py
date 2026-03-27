@@ -915,59 +915,8 @@ elif page == "⚔️ Conflict Resolver":
 # ─────────────────────────────────────────────
 
 elif page == "📖 Data Catalog":
-    st.title("📖 Data Catalog")
-    st.caption("Asset inventory with stewardship, classification, quality scores · Inspired by Atlan / Alation")
-
-    col_f1, col_f2, col_f3 = st.columns(3)
-    with col_f1:
-        sel_asset_type = st.multiselect("Asset Type", catalog_df["asset_type"].unique().tolist(),
-                                         default=catalog_df["asset_type"].unique().tolist())
-    with col_f2:
-        sel_domain = st.multiselect("Domain", catalog_df["domain"].unique().tolist(),
-                                     default=catalog_df["domain"].unique().tolist())
-    with col_f3:
-        cert_only = st.checkbox("Certified Only", value=False)
-
-    cat_view = catalog_df.copy()
-    if sel_asset_type:
-        cat_view = cat_view[cat_view["asset_type"].isin(sel_asset_type)]
-    if sel_domain:
-        cat_view = cat_view[cat_view["domain"].isin(sel_domain)]
-    if cert_only:
-        cat_view = cat_view[cat_view["certified"] == True]
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Assets",     len(cat_view))
-    k2.metric("Certified",        cat_view["certified"].sum())
-    k3.metric("Avg DQ Score",     f"{cat_view['quality_score'].mean():.1f}%")
-    k4.metric("Avg Completeness", f"{cat_view['completeness_pct'].mean():.1f}%")
-
-    st.markdown("---")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("DQ Score Distribution")
-        fig_qs = px.histogram(cat_view, x="quality_score", nbins=20,
-                              color_discrete_sequence=["#4fc3f7"],
-                              title="Quality Score Distribution")
-        fig_qs.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                             font_color="white", height=300)
-        st.plotly_chart(fig_qs, use_container_width=True)
-
-    with col2:
-        st.subheader("Assets by Steward Role")
-        role_cnt = cat_view["steward_role"].value_counts().reset_index()
-        role_cnt.columns = ["Role", "Count"]
-        fig_role = px.pie(role_cnt, values="Count", names="Role", hole=0.4,
-                          color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig_role.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="white", height=300)
-        st.plotly_chart(fig_role, use_container_width=True)
-
-    st.subheader("📋 Asset Inventory")
-    display_cols = ["asset_id","asset_type","asset_name","domain","sub_domain","source_system",
-                    "data_layer","steward_name","steward_role","quality_score","completeness_pct",
-                    "certified","tags","last_profiled"]
-    st.dataframe(cat_view[display_cols], use_container_width=True, hide_index=True)
+    from utils.data_catalog import render_data_catalog_page
+    render_data_catalog_page(sf_df=sf_df, sc_df=sc_df, stewards_df=stewards_df)
 
 # ─────────────────────────────────────────────
 # PAGE: DATA PROFILING
