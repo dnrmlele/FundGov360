@@ -9,7 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-from utils.data_generator import load_all_data, gen_rule_trends
+from utils.data_generator import load_all_data
 from utils.rule_engine import (
     init_rule_engine_state, get_rules_df, run_all_rules,
     compute_dq_score, get_rules_summary_df, generate_alerts,
