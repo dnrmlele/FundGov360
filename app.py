@@ -77,23 +77,23 @@ st.markdown("""
 def load_data():
     return load_all_data(nav_days=365, n_transactions=500)
 
-if "data" not in st.session_state:
-    st.session_state["data"] = load_data()
+from db_setup import load_fundgov360_data
 
-data         = st.session_state["data"]
-funds_df     = data["funds"]
-sf_df        = data["sub_funds"]
-sc_df        = data["share_classes"]
-nav_df       = data["nav"]
-ytd_df       = data["ytd"]
-port_df      = data["portfolio"]
-tx_df        = data["transactions"]
-reg_df       = data["registration"]
-stewards_df  = data["stewards"]
-catalog_df   = data["catalog"]
-lineage_df   = data["lineage"]
-nodes_df     = data["lineage_nodes"]
-profiling_df = data["profiling"]
+if "data" not in st.session_state:
+    st.session_state["data"] = load_fundgov360_data()
+
+data            = st.session_state["data"]
+funds_df        = data["fund"]
+sf_df           = data["sub_funds"]
+sc_df           = data["share_classes"]
+nav_df          = data["nav"]
+port_df         = data["portfolio"]
+tx_df           = data["transactions"]
+reg_df          = data["registration"]
+stewards_df     = data["stewards"]
+teams_df        = data["teams"]
+data_elements   = data["data_elements"]
+taxonomy_domains = data["taxonomy_domains"]
 
 # Initialise engines
 init_rule_engine_state()
