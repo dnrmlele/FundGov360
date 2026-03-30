@@ -157,10 +157,33 @@ catalog_df   = data["catalog"]
 lineage_df   = data["lineage"]
 nodes_df     = data["lineage_nodes"]
 profiling_df   = data["profiling"]
-sc_events_df   = data.get("sc_events",  pd.DataFrame())
-kid_pkg_df     = data.get("kid_pkg",    pd.DataFrame())
-dereg_df       = data.get("dereg",      pd.DataFrame())
-event_log_df   = data.get("event_log",  pd.DataFrame())
+
+# ── Scenario Simulator data (computed from resolved sc_df) ────────────────
+if "scenario_data" not in st.session_state:
+    try:
+        _sc_norm = sc_df.copy()
+        if "share_class_id" not in _sc_norm.columns:
+            _sc_norm = _sc_norm.rename(columns={"sc_id": "share_class_id"})
+        if "fund_id" not in _sc_norm.columns and "fund_id" in sc_df.columns:
+            _sc_norm["fund_id"] = sc_df["fund_id"].values
+        _sc_ev  = gen_share_class_events(_sc_norm)
+        _kid    = gen_kid_data_packages(_sc_norm)
+        _dreg   = gen_deregistration_events(_sc_norm)
+        _evlog  = gen_event_log(_sc_ev, _dreg)
+        st.session_state["scenario_data"] = {
+            "sc_events": _sc_ev, "kid_pkg": _kid,
+            "dereg": _dreg, "event_log": _evlog,
+        }
+    except Exception:
+        st.session_state["scenario_data"] = {
+            "sc_events": pd.DataFrame(), "kid_pkg": pd.DataFrame(),
+            "dereg": pd.DataFrame(), "event_log": pd.DataFrame(),
+        }
+
+sc_events_df  = st.session_state["scenario_data"]["sc_events"]
+kid_pkg_df    = st.session_state["scenario_data"]["kid_pkg"]
+dereg_df      = st.session_state["scenario_data"]["dereg"]
+event_log_df  = st.session_state["scenario_data"]["event_log"]
 
 # Initialise engines
 init_rule_engine_state()
@@ -214,6 +237,7 @@ with st.sidebar:
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.cache_data.clear()
         st.session_state.pop("data", None)
+        st.session_state.pop("scenario_data", None)
         st.rerun()
 
     st.markdown("---")
