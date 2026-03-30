@@ -97,51 +97,6 @@ st.markdown("""
     [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3 { color: #86BC25; }
 
-    /* ── WIP Banner ──────────────────────────────────────────────── */
-    .wip-banner {
-        background: linear-gradient(90deg, #26282B 0%, #1a1a1a 100%);
-        border: 1px solid #86BC25;
-        border-left: 5px solid #86BC25;
-        border-radius: 6px;
-        padding: 10px 18px;
-        margin-bottom: 18px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-    }
-    .wip-banner .wip-tag {
-        background: #86BC25;
-        color: #000;
-        font-weight: 800;
-        font-size: 0.72rem;
-        letter-spacing: 0.08em;
-        padding: 3px 10px;
-        border-radius: 3px;
-        text-transform: uppercase;
-        white-space: nowrap;
-    }
-    .wip-banner .wip-text {
-        color: #D0D0CE;
-        font-size: 0.82rem;
-    }
-    .wip-banner .wip-text strong { color: #86BC25; }
-
-    /* ── Ownership footer ────────────────────────────────────────── */
-    .ownership-footer {
-        position: fixed;
-        bottom: 0; left: 0; right: 0;
-        background: #26282B;
-        border-top: 2px solid #86BC25;
-        padding: 5px 20px;
-        font-size: 0.70rem;
-        color: #63666A;
-        z-index: 999;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    .ownership-footer span { color: #86BC25; font-weight: 600; }
-
     /* ── Plotly chart bg transparent ────────────────────────────── */
     .js-plotly-plot { border-radius: 8px; }
 
@@ -273,6 +228,21 @@ init_resolver_state()
 # ─────────────────────────────────────────────
 
 with st.sidebar:
+    # WIP Banner — always visible in sidebar
+    st.markdown(
+        """<div style="background:#1a1a1a; border-left:4px solid #86BC25;
+            border-radius:5px; padding:8px 12px; margin-bottom:12px;">
+            <div style="background:#86BC25; color:#000; font-weight:800;
+                font-size:0.65rem; letter-spacing:0.1em; display:inline-block;
+                padding:2px 8px; border-radius:2px; margin-bottom:4px;">
+                ⚠&nbsp; WORK IN PROGRESS
+            </div>
+            <div style="color:#D0D0CE; font-size:0.72rem; line-height:1.4;">
+                For internal demoing purposes only
+            </div>
+        </div>""",
+        unsafe_allow_html=True
+    )
     st.markdown("## 🏦 FundGov360")
     st.markdown("**Fund Data Governance Platform**")
     st.caption("by Clément · All rights reserved")
