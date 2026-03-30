@@ -29,6 +29,9 @@ from utils.conflict_resolver import (
     detect_conflicts, CONFLICT_TYPES, PRIORITY_LEVELS,
     RESOLUTION_METHODS, RESOLVER_NAMES,
 )
+from utils.contract_engine import (
+    gen_contracts, gen_breach_history,
+)
 from utils.scenario_engine import (
     gen_share_class_events,
     gen_kid_data_packages,
@@ -215,6 +218,12 @@ if "scenario_data" not in st.session_state:
         }
 
 sc_events_df  = st.session_state["scenario_data"]["sc_events"]
+
+# ── Contract data ─────────────────────────────────────────────────────────────
+if "contracts_df" not in st.session_state:
+    st.session_state["contracts_df"] = gen_contracts(stewards_df)
+if "breach_df" not in st.session_state:
+    st.session_state["breach_df"] = gen_breach_history(st.session_state["contracts_df"])
 kid_pkg_df    = st.session_state["scenario_data"]["kid_pkg"]
 dereg_df      = st.session_state["scenario_data"]["dereg"]
 event_log_df  = st.session_state["scenario_data"]["event_log"]
@@ -265,6 +274,7 @@ with st.sidebar:
             "🔗 Data Lineage",
             "👤 Stewardship",
             "🎬 Scenario Simulator",
+            "📜 Data Contracts",
         ],
         label_visibility="collapsed",
     )
@@ -293,6 +303,15 @@ with st.sidebar:
     st.markdown("---")
     st.markdown('<span class="bronze-banner">🥉 Bronze</span> &nbsp; <span class="silver-banner">🥈 Silver</span> &nbsp; <span class="gold-banner">🥇 Gold</span>', unsafe_allow_html=True)
     st.caption("Medallion Architecture")
+    st.markdown("---")
+    st.markdown(
+        """<div style="color:#63666A; font-size:0.68rem; line-height:1.7; padding:2px 0;">
+            Project by <span style="color:#86BC25; font-weight:600;">Clément Denorme</span><br>
+            All rights reserved<br>
+            Internal demo only &mdash; not for distribution
+        </div>""",
+        unsafe_allow_html=True
+    )
 
 # ─────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -1558,3 +1577,389 @@ elif page == "🎬 Scenario Simulator":
             }),
             use_container_width=True, hide_index=True
         )
+
+
+
+elif page == "📜 Data Contracts":
+    from utils.contract_engine import (
+        gen_contracts, gen_contract_schema, gen_contract_rules,
+        gen_breach_history, new_contract_dict,
+        CONTRACT_DOMAINS, PRODUCERS, CONSUMERS, SEVERITIES,
+    )
+
+    # ── Initialise session state ────────────────────────────────────────────
+    if "contracts_df" not in st.session_state:
+        st.session_state["contracts_df"] = gen_contracts(stewards_df)
+    if "breach_df" not in st.session_state:
+        st.session_state["breach_df"] = gen_breach_history(st.session_state["contracts_df"])
+
+    cdf = st.session_state["contracts_df"]
+    bdf = st.session_state["breach_df"]
+
+    STATUS_COLOR = {
+        "Active":      "#86BC25",
+        "Draft":       "#63666A",
+        "In Review":   "#00A3E0",
+        "Breached":    "#EF4444",
+        "Expired":     "#F0AB00",
+        "Deprecated":  "#4B5563",
+    }
+
+    def status_badge(s):
+        c = STATUS_COLOR.get(s, "#63666A")
+        icon = {"Active":"✅","Draft":"📝","In Review":"🔍","Breached":"🚨","Expired":"⏰","Deprecated":"🗂️"}.get(s,"")
+        return f'<span style="background:{c};color:#fff;padding:2px 10px;border-radius:3px;font-size:0.72rem;font-weight:700;">{icon} {s}</span>'
+
+    def health_bar(score):
+        pct  = int(score * 100)
+        col  = "#86BC25" if pct >= 90 else "#F0AB00" if pct >= 70 else "#EF4444"
+        return f'<div style="background:#26282B;border-radius:4px;height:8px;width:100px;display:inline-block;vertical-align:middle;"><div style="background:{col};width:{pct}px;height:8px;border-radius:4px;"></div></div> <span style="font-size:0.75rem;color:{col};">{pct}%</span>'
+
+    st.title("📜 Data Contracts")
+    st.markdown(
+        "> A **data contract** is a formal agreement between a data producer and a data consumer "
+        "that defines schema, quality rules, SLA expectations, and ownership. "
+        "FundGov360 tracks contracts end-to-end — from draft to breach resolution."
+    )
+
+    # ── Top KPIs ──────────────────────────────────────────────────────────────
+    k1,k2,k3,k4,k5 = st.columns(5)
+    k1.metric("Total Contracts",  len(cdf))
+    k2.metric("✅ Active",        len(cdf[cdf["status"]=="Active"]))
+    k3.metric("🚨 Breached",      len(cdf[cdf["status"]=="Breached"]))
+    k4.metric("📝 Draft / Review", len(cdf[cdf["status"].isin(["Draft","In Review"])]))
+    open_b = len(bdf[~bdf["resolved"]]) if not bdf.empty and "resolved" in bdf.columns else 0
+    k5.metric("🔴 Open Breaches", open_b)
+
+    st.divider()
+
+    tab_reg, tab_detail, tab_breach, tab_new = st.tabs([
+        "📋 Contract Registry",
+        "🔍 Contract Detail",
+        "💔 Breach Monitor",
+        "✏️  Register New Contract",
+    ])
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 1 — CONTRACT REGISTRY
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_reg:
+        st.subheader("Contract Registry")
+        st.caption("All data contracts across domains — filter, search, and inspect")
+
+        f1,f2,f3 = st.columns(3)
+        sel_status = f1.multiselect("Status", cdf["status"].unique().tolist(),
+                                    default=cdf["status"].unique().tolist(), key="cr_status")
+        sel_domain = f2.multiselect("Domain", cdf["domain"].unique().tolist(),
+                                    default=cdf["domain"].unique().tolist(), key="cr_domain")
+        sel_prod   = f3.multiselect("Producer", cdf["producer"].unique().tolist(),
+                                    default=cdf["producer"].unique().tolist(), key="cr_prod")
+
+        view = cdf[
+            cdf["status"].isin(sel_status) &
+            cdf["domain"].isin(sel_domain) &
+            cdf["producer"].isin(sel_prod)
+        ].copy()
+
+        # Health donut
+        col_chart, col_tbl = st.columns([1, 2])
+        with col_chart:
+            status_counts = view["status"].value_counts().reset_index()
+            status_counts.columns = ["Status","Count"]
+            fig_s = px.pie(
+                status_counts, names="Status", values="Count", hole=0.55,
+                title="Contract Status",
+                color="Status",
+                color_discrete_map=STATUS_COLOR,
+            )
+            fig_s.update_layout(
+                template="plotly_dark", height=260,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(t=40, b=0, l=0, r=0),
+                legend=dict(font=dict(size=11)),
+            )
+            st.plotly_chart(fig_s, use_container_width=True)
+
+            # SLA heatmap by domain
+            domain_health = view.groupby("domain")["health_score"].mean().reset_index()
+            fig_h = px.bar(
+                domain_health, x="health_score", y="domain", orientation="h",
+                title="Avg Health by Domain",
+                color="health_score",
+                color_continuous_scale=["#EF4444","#F0AB00","#86BC25"],
+                range_color=[0.5, 1.0],
+            )
+            fig_h.update_layout(
+                template="plotly_dark", height=240,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(t=40, b=0, l=0, r=0),
+                coloraxis_showscale=False,
+                xaxis_title="Health Score", yaxis_title="",
+            )
+            st.plotly_chart(fig_h, use_container_width=True)
+
+        with col_tbl:
+            display = view[[
+                "contract_id","contract_name","domain","producer","consumer",
+                "version","status","owner","health_score","breach_count",
+                "sla_delivery_h","effective_date","expiry_date"
+            ]].rename(columns={
+                "contract_id":"ID","contract_name":"Contract","domain":"Domain",
+                "producer":"Producer","consumer":"Consumer","version":"Ver.",
+                "status":"Status","owner":"Owner","health_score":"Health",
+                "breach_count":"Breaches","sla_delivery_h":"SLA (h)",
+                "effective_date":"Effective","expiry_date":"Expires",
+            })
+            st.dataframe(display, use_container_width=True, hide_index=True, height=500)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 2 — CONTRACT DETAIL
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_detail:
+        st.subheader("Contract Detail")
+
+        sel_cid = st.selectbox(
+            "Select a contract",
+            cdf["contract_id"] + "  —  " + cdf["contract_name"],
+            key="cd_select"
+        )
+        cid  = sel_cid.split("  —  ")[0].strip()
+        crow = cdf[cdf["contract_id"] == cid].iloc[0]
+
+        # Header
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.markdown(f"**ID:** `{crow['contract_id']}`")
+        sc2.markdown(f"**Version:** `{crow['version']}`")
+        sc3.markdown(f"**Domain:** `{crow['domain']}`")
+        sc4.markdown(
+            f"**Status:** {status_badge(crow['status'])}",
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            f"<div style='background:#1a1a1a;border-left:4px solid #86BC25;"
+            f"padding:12px 16px;border-radius:6px;margin:8px 0;color:#D0D0CE;font-size:0.85rem;'>"
+            f"{crow['description']}</div>",
+            unsafe_allow_html=True
+        )
+
+        # Parties + SLA
+        pa, pb, pc = st.columns(3)
+        with pa:
+            st.markdown("### 🏭 Parties")
+            st.markdown(f"**Producer:** {crow['producer']}")
+            st.markdown(f"**Consumer:** {crow['consumer']}")
+            st.markdown(f"**Owner:** {crow['owner']}")
+        with pb:
+            st.markdown("### ⏱ SLA")
+            st.metric("Delivery SLA",    f"{crow['sla_delivery_h']}h")
+            st.metric("Freshness SLA",   f"{crow['sla_freshness_h']}h")
+            st.metric("Availability",    f"{crow['sla_availability_pct']}%")
+        with pc:
+            st.markdown("### 📅 Lifecycle")
+            st.metric("Effective",  crow["effective_date"])
+            st.metric("Expires",    crow["expiry_date"])
+            st.metric("Health",     f"{int(crow['health_score']*100)}%")
+
+        st.markdown("---")
+
+        schema_tab, rules_tab, history_tab = st.tabs(
+            ["📐 Schema", "✅ Quality Rules", "📋 Breach History"]
+        )
+
+        with schema_tab:
+            st.subheader("Schema Definition")
+            schema_df = gen_contract_schema(cid)
+            if not schema_df.empty:
+                st.dataframe(schema_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No schema defined for this contract.")
+
+        with rules_tab:
+            st.subheader("Quality Rules")
+            rules_df = gen_contract_rules(cid)
+            if not rules_df.empty:
+                st.dataframe(rules_df, use_container_width=True, hide_index=True)
+                pass_count = len(rules_df[rules_df["status"].str.contains("Pass")])
+                st.metric("Rules Passing", f"{pass_count} / {len(rules_df)}")
+            else:
+                st.info("No quality rules defined.")
+
+        with history_tab:
+            st.subheader("Breach History")
+            contract_breaches = bdf[bdf["contract_id"] == cid] if not bdf.empty else pd.DataFrame()
+            if not contract_breaches.empty:
+                st.dataframe(
+                    contract_breaches[[
+                        "breach_id","breach_date","breach_type",
+                        "severity","description","status","resolved_by"
+                    ]],
+                    use_container_width=True, hide_index=True
+                )
+            else:
+                st.success("✅ No breaches recorded for this contract.")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 3 — BREACH MONITOR
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_breach:
+        st.subheader("Breach Monitor")
+        st.caption("Track, triage and resolve data contract violations")
+
+        if bdf.empty:
+            st.success("✅ No breaches recorded across all contracts.")
+        else:
+            open_breaches   = bdf[~bdf["resolved"]] if "resolved" in bdf.columns else pd.DataFrame()
+            closed_breaches = bdf[bdf["resolved"]]  if "resolved" in bdf.columns else pd.DataFrame()
+
+            bk1, bk2, bk3, bk4 = st.columns(4)
+            bk1.metric("Total Breaches",   len(bdf))
+            bk2.metric("🔴 Open",          len(open_breaches))
+            bk3.metric("✅ Resolved",       len(closed_breaches))
+            bk4.metric("Critical / High",
+                       len(bdf[bdf["severity"].isin(["Critical","High"])]))
+
+            # Breach by type chart
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                type_cnt = bdf["breach_type"].value_counts().reset_index()
+                type_cnt.columns = ["Type", "Count"]
+                fig_bt = px.bar(
+                    type_cnt, x="Count", y="Type", orientation="h",
+                    title="Breaches by Type",
+                    color_discrete_sequence=["#EF4444"]
+                )
+                fig_bt.update_layout(
+                    template="plotly_dark", height=280,
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(t=40,b=0,l=0,r=0), yaxis_title="", xaxis_title="Count"
+                )
+                st.plotly_chart(fig_bt, use_container_width=True)
+            with bc2:
+                sev_cnt = bdf["severity"].value_counts().reset_index()
+                sev_cnt.columns = ["Severity", "Count"]
+                sev_colors = {"Critical":"#C62828","High":"#E65100",
+                              "Medium":"#F9A825","Low":"#86BC25"}
+                fig_sv = px.pie(
+                    sev_cnt, names="Severity", values="Count", hole=0.5,
+                    title="Breaches by Severity",
+                    color="Severity", color_discrete_map=sev_colors
+                )
+                fig_sv.update_layout(
+                    template="plotly_dark", height=280,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(t=40,b=0,l=0,r=0)
+                )
+                st.plotly_chart(fig_sv, use_container_width=True)
+
+            if not open_breaches.empty:
+                st.markdown("### 🔴 Open Breaches — Requiring Action")
+                for _, br in open_breaches.iterrows():
+                    sev_col = {"Critical":"#C62828","High":"#E65100",
+                               "Medium":"#F9A825","Low":"#86BC25"}.get(br["severity"],"#63666A")
+                    with st.expander(
+                        f"🚨 {br['contract_name']}  —  {br['breach_type']}  "
+                        f"({br['severity']})  ·  {br['breach_date'][:10]}",
+                        expanded=False
+                    ):
+                        col_i, col_a = st.columns([2,1])
+                        with col_i:
+                            st.markdown(f"**Contract:** `{br['contract_id']}`")
+                            st.markdown(f"**Domain:** {br['domain']}")
+                            st.markdown(f"**Type:** {br['breach_type']}")
+                            st.error(f"🚨 {br['description']}")
+                        with col_a:
+                            st.markdown("**Resolve this breach:**")
+                            resolved_by = st.text_input(
+                                "Resolved by", key=f"rb_{br['breach_id']}"
+                            )
+                            comment = st.text_area(
+                                "Resolution note", key=f"rc_{br['breach_id']}", height=80
+                            )
+                            if st.button("✅ Mark Resolved", key=f"btn_{br['breach_id']}"):
+                                idx = st.session_state["breach_df"][
+                                    st.session_state["breach_df"]["breach_id"] == br["breach_id"]
+                                ].index
+                                st.session_state["breach_df"].loc[idx, "resolved"]      = True
+                                st.session_state["breach_df"].loc[idx, "status"]        = "✅ Resolved"
+                                st.session_state["breach_df"].loc[idx, "resolved_by"]   = resolved_by or "—"
+                                st.session_state["breach_df"].loc[idx, "resolved_date"] = datetime.today().strftime("%Y-%m-%d %H:%M")
+                                st.success("Breach marked as resolved.")
+                                st.rerun()
+
+            st.markdown("### 📋 Full Breach History")
+            st.dataframe(
+                bdf[[
+                    "breach_id","contract_name","domain","breach_date",
+                    "breach_type","severity","description","status","resolved_by"
+                ]],
+                use_container_width=True, hide_index=True
+            )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 4 — REGISTER NEW CONTRACT
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_new:
+        st.subheader("✏️ Register a New Data Contract")
+        st.caption("Fill in the form below to create a new data contract. It will be saved in Draft status.")
+
+        with st.form("new_contract_form", clear_on_submit=False):
+            nc1, nc2 = st.columns(2)
+            with nc1:
+                c_name   = st.text_input("Contract Name *", placeholder="e.g. TA → Settlement Confirmations")
+                c_domain = st.selectbox("Domain *", CONTRACT_DOMAINS)
+                c_prod   = st.selectbox("Producer *", PRODUCERS)
+                c_cons   = st.selectbox("Consumer *", CONSUMERS)
+                c_owner  = st.text_input("Contract Owner *", placeholder="e.g. Alice Mercer")
+            with nc2:
+                c_ver    = st.text_input("Version", value="1.0.0")
+                c_sla_d  = st.number_input("SLA Delivery (hours)", min_value=1, max_value=168, value=4)
+                c_sla_f  = st.number_input("SLA Freshness (hours)", min_value=1, max_value=720, value=8)
+                c_sla_a  = st.number_input("SLA Availability (%)", min_value=90.0, max_value=100.0,
+                                           value=99.0, step=0.1)
+                c_eff    = st.date_input("Effective Date")
+                c_exp    = st.date_input("Expiry Date",
+                                         value=datetime.today() + timedelta(days=365))
+
+            c_desc = st.text_area("Description", height=100,
+                                  placeholder="Describe the purpose and scope of this contract...")
+
+            submitted = st.form_submit_button("📥 Save as Draft", type="primary")
+
+        if submitted:
+            if not c_name.strip():
+                st.error("Contract Name is required.")
+            elif not c_owner.strip():
+                st.error("Contract Owner is required.")
+            else:
+                import uuid
+                new_id = f"DC-{len(st.session_state['contracts_df'])+1:03d}"
+                new_row = {
+                    "contract_id":          new_id,
+                    "contract_name":        c_name,
+                    "version":              c_ver,
+                    "status":               "Draft",
+                    "domain":               c_domain,
+                    "producer":             c_prod,
+                    "consumer":             c_cons,
+                    "description":          c_desc,
+                    "owner":                c_owner,
+                    "created_date":         datetime.today().strftime("%Y-%m-%d"),
+                    "effective_date":       str(c_eff),
+                    "expiry_date":          str(c_exp),
+                    "sla_delivery_h":       int(c_sla_d),
+                    "sla_freshness_h":      int(c_sla_f),
+                    "sla_availability_pct": float(c_sla_a),
+                    "last_validated":       "—",
+                    "breach_count":         0,
+                    "health_score":         1.0,
+                    "n_fields":             0,
+                    "n_rules":              0,
+                }
+                new_df = pd.DataFrame([new_row])
+                st.session_state["contracts_df"] = pd.concat(
+                    [st.session_state["contracts_df"], new_df], ignore_index=True
+                )
+                st.success(f"✅ Contract **{new_id} — {c_name}** saved as Draft. "
+                           f"Go to Contract Detail to add schema fields and quality rules.")
+                st.rerun()
