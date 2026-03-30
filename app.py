@@ -1198,11 +1198,11 @@ elif page == "🎬 Scenario Simulator":
                         st.error("Not informed at all.")
 
             if ev_row["n_issues_without"] > 0:
-                st.error(f"**{ev_row['n_issues_without']} issue(s) identified:**
+                n_iss = ev_row["n_issues_without"]
+                i_txt = " | ".join(str(ev_row["issues_without"]).split(" | "))
+                i_list = "\n".join(f"- {x}" for x in str(ev_row["issues_without"]).split(" | "))
+                st.error(f"**{n_iss} issue(s) identified:\n\n" + i_list)
 
-"
-                         + "
-".join(f"- {x}" for x in ev_row["issues_without"].split(" | ")))
 
         with col_wi:
             st.markdown("### ✅  With Data Governance")
