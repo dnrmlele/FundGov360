@@ -54,28 +54,107 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+    /* ── Deloitte Brand Palette ──────────────────────────────────── */
+    :root {
+        --dtt-green:       #86BC25;
+        --dtt-green-dark:  #5a8a00;
+        --dtt-black:       #000000;
+        --dtt-charcoal:    #26282B;
+        --dtt-gray:        #63666A;
+        --dtt-light-gray:  #D0D0CE;
+        --dtt-blue:        #00A3E0;
+        --dtt-teal:        #0097A9;
+        --dtt-white:       #FFFFFF;
+    }
+
+    /* ── Metric cards ─────────────────────────────────────────────── */
     .metric-card {
-        background: linear-gradient(135deg, #1e3a5f 0%, #16213e 100%);
-        border-radius: 12px;
+        background: linear-gradient(135deg, #1a1a1a 0%, #26282B 100%);
+        border-radius: 8px;
         padding: 1.2rem 1.5rem;
-        border-left: 4px solid #4fc3f7;
+        border-left: 4px solid #86BC25;
         margin-bottom: 0.5rem;
     }
-    .metric-card h3 { color: #90caf9; font-size: 0.85rem; margin: 0; }
-    .metric-card h1 { color: #ffffff; font-size: 2rem; margin: 0.2rem 0; }
-    .metric-card p  { color: #b0bec5; font-size: 0.75rem; margin: 0; }
+    .metric-card h3 { color: #86BC25; font-size: 0.85rem; margin: 0; font-weight: 600; }
+    .metric-card h1 { color: #FFFFFF; font-size: 2rem; margin: 0.2rem 0; }
+    .metric-card p  { color: #D0D0CE; font-size: 0.75rem; margin: 0; }
 
-    .badge-critical { background:#ef5350; color:white; border-radius:4px; padding:2px 8px; font-size:0.75rem; }
-    .badge-high     { background:#ff9800; color:white; border-radius:4px; padding:2px 8px; font-size:0.75rem; }
-    .badge-medium   { background:#fdd835; color:#333; border-radius:4px; padding:2px 8px; font-size:0.75rem; }
-    .badge-low      { background:#66bb6a; color:white; border-radius:4px; padding:2px 8px; font-size:0.75rem; }
+    /* ── Severity badges ─────────────────────────────────────────── */
+    .badge-critical { background:#C62828; color:white; border-radius:3px; padding:2px 8px; font-size:0.75rem; }
+    .badge-high     { background:#E65100; color:white; border-radius:3px; padding:2px 8px; font-size:0.75rem; }
+    .badge-medium   { background:#F9A825; color:#1a1a1a; border-radius:3px; padding:2px 8px; font-size:0.75rem; }
+    .badge-low      { background:#86BC25; color:#1a1a1a; border-radius:3px; padding:2px 8px; font-size:0.75rem; }
 
-    .gold-banner   { background: linear-gradient(90deg,#b8860b,#ffd700); color:#1a1a1a; padding:6px 12px; border-radius:6px; font-weight:700; }
-    .silver-banner { background: linear-gradient(90deg,#708090,#c0c0c0); color:#1a1a1a; padding:6px 12px; border-radius:6px; font-weight:700; }
-    .bronze-banner { background: linear-gradient(90deg,#8b4513,#cd7f32); color:#fff; padding:6px 12px; border-radius:6px; font-weight:700; }
+    /* ── Medallion layer banners ─────────────────────────────────── */
+    .gold-banner   { background: linear-gradient(90deg,#86BC25,#a8d44a); color:#1a1a1a; padding:6px 14px; border-radius:4px; font-weight:700; }
+    .silver-banner { background: linear-gradient(90deg,#63666A,#9b9ea3); color:#fff; padding:6px 14px; border-radius:4px; font-weight:700; }
+    .bronze-banner { background: linear-gradient(90deg,#26282B,#4a4d52); color:#86BC25; padding:6px 14px; border-radius:4px; font-weight:700; }
 
-    [data-testid="stSidebar"] { background: #0d1b2a; }
-    [data-testid="stSidebar"] .stMarkdown p { color: #90caf9; }
+    /* ── Sidebar ─────────────────────────────────────────────────── */
+    [data-testid="stSidebar"] { background: #1a1a1a; border-right: 2px solid #86BC25; }
+    [data-testid="stSidebar"] .stMarkdown p { color: #D0D0CE; }
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 { color: #86BC25; }
+
+    /* ── WIP Banner ──────────────────────────────────────────────── */
+    .wip-banner {
+        background: linear-gradient(90deg, #26282B 0%, #1a1a1a 100%);
+        border: 1px solid #86BC25;
+        border-left: 5px solid #86BC25;
+        border-radius: 6px;
+        padding: 10px 18px;
+        margin-bottom: 18px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .wip-banner .wip-tag {
+        background: #86BC25;
+        color: #000;
+        font-weight: 800;
+        font-size: 0.72rem;
+        letter-spacing: 0.08em;
+        padding: 3px 10px;
+        border-radius: 3px;
+        text-transform: uppercase;
+        white-space: nowrap;
+    }
+    .wip-banner .wip-text {
+        color: #D0D0CE;
+        font-size: 0.82rem;
+    }
+    .wip-banner .wip-text strong { color: #86BC25; }
+
+    /* ── Ownership footer ────────────────────────────────────────── */
+    .ownership-footer {
+        position: fixed;
+        bottom: 0; left: 0; right: 0;
+        background: #26282B;
+        border-top: 2px solid #86BC25;
+        padding: 5px 20px;
+        font-size: 0.70rem;
+        color: #63666A;
+        z-index: 999;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .ownership-footer span { color: #86BC25; font-weight: 600; }
+
+    /* ── Plotly chart bg transparent ────────────────────────────── */
+    .js-plotly-plot { border-radius: 8px; }
+
+    /* ── Streamlit button accent ─────────────────────────────────── */
+    .stButton > button {
+        border: 1px solid #86BC25 !important;
+        color: #86BC25 !important;
+        background: transparent !important;
+    }
+    .stButton > button:hover {
+        background: #86BC25 !important;
+        color: #000 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -196,6 +275,7 @@ init_resolver_state()
 with st.sidebar:
     st.markdown("## 🏦 FundGov360")
     st.markdown("**Fund Data Governance Platform**")
+    st.caption("by Clément · All rights reserved")
     st.markdown("---")
 
     page = st.radio(
@@ -688,7 +768,7 @@ elif page == "🗂️ Static Data":
 
 elif page == "🔧 DQ Rule Manager":
     st.title("🔧 Data Quality Rule Manager")
-    st.caption("Define, execute and monitor DQ rules · Inspired by Talend DQ / Great Expectations / Atlan")
+    st.caption("Define, execute and monitor business rules · FundGov360 Data Quality Engine")
 
     tab_run, tab_results, tab_trends, tab_manage, tab_import = st.tabs([
         "▶️ Run Rules", "📊 Results", "📈 Trends", "⚙️ Manage Rules", "📥 Import/Export"
@@ -840,7 +920,7 @@ elif page == "🔧 DQ Rule Manager":
 
 elif page == "⚔️ Conflict Resolver":
     st.title("⚔️ Data Conflict Resolver")
-    st.caption("Detect, triage and resolve data conflicts · Inspired by Informatica MDM / Talend MDM")
+    st.caption("Detect, triage and resolve data conflicts across sources · FundGov360 Conflict Resolver")
 
     tab_overview, tab_queue, tab_resolve, tab_golden, tab_audit, tab_simulate = st.tabs([
         "📊 Overview", "📋 Conflict Queue", "🔧 Resolve", "🥇 Golden Records", "📜 Audit Trail", "🎲 Simulate"
@@ -993,7 +1073,7 @@ elif page == "📖 Data Catalog":
 
 elif page == "🔬 Data Profiling":
     st.title("🔬 Data Profiling")
-    st.caption("Field-level statistics and data quality metrics · Inspired by Talend Data Quality / Atlan Profiler")
+    st.caption("Field-level statistics and data quality metrics · FundGov360 Data Profiler")
 
     sel_dataset = st.selectbox("Dataset", profiling_df["dataset"].unique().tolist())
     prof_view   = profiling_df[profiling_df["dataset"] == sel_dataset].copy()
@@ -1038,7 +1118,7 @@ elif page == "🔬 Data Profiling":
 
 elif page == "🔗 Data Lineage":
     st.title("🔗 Data Lineage")
-    st.caption("Bronze → Silver → Gold pipeline · Inspired by Atlan Lineage / Apache Atlas")
+    st.caption("Bronze → Silver → Gold pipeline · FundGov360 Data Lineage")
 
     tab_graph, tab_edges, tab_nodes = st.tabs(["🔀 Lineage Graph", "📋 Edge Table", "🗂️ Node Catalog"])
 
@@ -1086,7 +1166,7 @@ elif page == "🔗 Data Lineage":
 
 elif page == "👤 Stewardship":
     st.title("👤 Data Stewardship")
-    st.caption("Data owners, stewards and business owners · Inspired by Alation Stewardship / Atlan")
+    st.caption("Data owners, stewards and business owners · FundGov360 Stewardship")
 
     col_f1, col_f2 = st.columns(2)
     with col_f1:
